@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paniers INN</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--ink:#1d2733;--mute:#5d6b7a;--line:#dde3ea;--brand:#1f4e78;--brand-soft:#e6eef6;--ok:#2e7d32;--warn:#b26a00;--err:#c62828;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{background:var(--brand);color:#fff;padding:18px 16px}
+header h1{margin:0;font-size:20px}
+header p{margin:4px 0 0;opacity:.85;font-size:14px}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+#drop{border:2px dashed #9fb3c8;border-radius:10px;padding:28px 16px;text-align:center;cursor:pointer;background:#fafcfe}
+#drop.over{background:var(--brand-soft);border-color:var(--brand)}
+#drop strong{display:block;font-size:16px;margin-bottom:4px}
+#status{margin-top:12px;font-size:14px}
+#status.err{color:var(--err);font-weight:600}
+#status.ok{color:var(--ok)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+button{font:inherit;border:1px solid var(--brand);background:var(--brand);color:#fff;border-radius:7px;padding:7px 14px;cursor:pointer}
+button.sec{background:#fff;color:var(--brand)}
+button:disabled{opacity:.45;cursor:default}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.tab{background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 12px;border-radius:7px}
+.tab.on{background:#cfe8c6;border-color:#8bbf7c;font-weight:600}
+.tab .n{color:var(--mute);font-weight:400;margin-left:4px}
+.tblwrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;white-space:nowrap}
+th{background:var(--brand-soft);font-weight:600}
+td.q{text-align:right}
+td.desc{white-space:normal;min-width:240px}
+select{font:inherit;padding:2px 4px;border-radius:5px;border:1px solid var(--line)}
+select.pkg{background:#fff4d6;border-color:#e0b44a;font-weight:600}
+.empty{color:var(--mute);padding:18px 4px}
+.meta{color:var(--mute);font-size:13px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Paniers INN (saved_cart)</h1>
+  <p>Glisse ton fichier Orders : la page sort les 6 paniers INN au format saved_cart .xls.</p>
+</header>
+<main>
+  <section class="card">
+    <div id="drop" tabindex="0">
+      <strong>Glisse ton fichier Orders ici</strong>
+      <span class="meta">ou clique pour le choisir (.xlsx). Le fichier reste sur ton ordinateur, il n'est envoyé nulle part.</span>
+      <input id="file" type="file" accept=".xlsx,.xlsm" class="hidden">
+    </div>
+    <div id="status" class="meta">Aucun fichier chargé.</div>
+  </section>
+
+  <section id="result" class="card hidden">
+    <div class="bar">
+      <div class="meta" id="summary"></div>
+      <button id="dlAll">Télécharger les paniers</button>
+    </div>
+    <div class="tabs" id="tabs"></div>
+    <div class="bar" style="margin-bottom:8px">
+      <strong id="cartTitle"></strong>
+      <button class="sec" id="dlOne">Télécharger ce panier</button>
+    </div>
+    <div class="tblwrap" id="table"></div>
+    <p class="meta">Unité : EA par défaut, PKG pour les produits de ta liste. Si tu changes une unité, la page s'en souvient sur cet ordinateur.</p>
+  </section>
+</main>
+
+<script>
+// ---------- Réglages ----------
+const SHEETS = ['Concepteur', 'Concept'];          // ordre de recherche
+const QTY_COL = 6;                                  // colonne G (0 = A)
+const CARTS = [
+  {key:'1 - INN Frigo $',       file:'1_INN_Frigo_payant'},
+  {key:'2 - INN TP $',          file:'2_INN_TP_payant'},
+  {key:'3 - INN TP Gratuit',    file:'3_INN_TP_gratuit'},
+  {key:'4 - INN Frigo Gratuit', file:'4_INN_Frigo_gratuit'},
+  {key:'5 - INN Frigo Retro',   file:'5_INN_Frigo_retro'},
+  {key:'6 - INN TP Retro',      file:'6_INN_TP_retro'},
+];
+// Codes DR en PKG par défaut (s'applique aussi aux versions C, F, RB… du même code)
+const PKG_DEFAULT = ['DR001113','DR001163','DR001169','DR001872','DR001172','DR001569','DR001553','DR001205'];
+const STORE_KEY = 'paniersINN.unites';
+const HEADERS = ['cart_name','product_code','product_description','unit','quantity','comment','virtual_itemno'];
+
+// ---------- Mémoire des unités ----------
+function loadUnits(){ try{ return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }catch(e){ return {}; } }
+function saveUnits(u){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(u)); }catch(e){} }
+let unitOverrides = loadUnits();
+function baseCode(code){ const m = /^DR\d+/i.exec(code); return m ? m[0].toUpperCase() : code; }
+function unitFor(code){
+  if (unitOverrides[code]) return unitOverrides[code];
+  return PKG_DEFAULT.includes(baseCode(code)) ? 'PKG' : 'EA';
+}
+
+// ---------- Lecture ----------
+const norm = v => String(v ?? '').replace(/ /g,' ').trim();
+const low = v => norm(v).toLowerCase();
+function toNum(v){
+  if (typeof v === 'number') return v;
+  const s = norm(v).replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+function filtreRapide(r){
+  // Même règle que la formule « Filtre rapide » du concepteur
+  if (toNum(r.onCommande) !== 1) return 'Autres';
+  const f = low(r.fourn), t = low(r.tp), rg = low(r.rg);
+  if (f !== 'inn') return 'Autres';
+  const cat = {'$':'$','g':'Gratuit','retro':'Retro'}[rg];
+  if (!cat) return 'Autres';
+  if (t === 'frigo') return {'$':'1 - INN Frigo $','Gratuit':'4 - INN Frigo Gratuit','Retro':'5 - INN Frigo Retro'}[cat];
+  if (t === 'tp')    return {'$':'2 - INN TP $','Gratuit':'3 - INN TP Gratuit','Retro':'6 - INN TP Retro'}[cat];
+  return 'Autres';
+}
+
+let carts = {}, current = CARTS[0].key, sourceName = '';
+
+function setStatus(msg, cls){ const s = document.getElementById('status'); s.textContent = msg; s.className = cls || 'meta'; }
+
+async function handleFile(file){
+  if (!file) return;
+  setStatus('Lecture de « ' + file.name + ' »… (quelques secondes pour un gros fichier)');
+  document.getElementById('result').classList.add('hidden');
+  try{
+    const buf = await file.arrayBuffer();
+    const names = XLSX.read(buf, {type:'array', bookSheets:true}).SheetNames;
+    const sheetName = SHEETS.find(n => names.includes(n));
+    if (!sheetName){ setStatus('Onglet « Concepteur » ou « Concept » introuvable dans ce fichier.', 'err'); return; }
+    const wb = XLSX.read(buf, {type:'array', sheets:[sheetName], cellFormula:false, cellStyles:false});
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1, defval:null, raw:true});
+    const hdr = (rows[0] || []).map(low);
+    const col = name => hdr.indexOf(name.toLowerCase());
+    const c = {desc:col('Description'), code:col('Code'), filtre:col('Filtre rapide'),
+               onCommande:col('on commande'), tp:col('TP/Frigo'), rg:col('RG$'), fourn:col('Fourn')};
+    const missing = ['desc','code'].filter(k => c[k] < 0);
+    if (c.filtre < 0) ['onCommande','tp','rg','fourn'].forEach(k => { if (c[k] < 0) missing.push(k); });
+    if (missing.length){ setStatus('Colonnes introuvables dans l’onglet ' + sheetName + ' : ' + missing.join(', '), 'err'); return; }
+
+    carts = {}; CARTS.forEach(k => carts[k.key] = []);
+    let lus = 0;
+    for (let i = 1; i < rows.length; i++){
+      const r = rows[i]; if (!r || !norm(r[c.desc])) continue;
+      lus++;
+      const qty = toNum(r[QTY_COL]);
+      if (!(qty > 0)) continue;
+      const code = norm(r[c.code]);
+      const filtre = c.filtre >= 0 ? norm(r[c.filtre]) :
+        filtreRapide({onCommande:r[c.onCommande], tp:r[c.tp], rg:r[c.rg], fourn:r[c.fourn]});
+      if (!carts[filtre]) continue;
+      carts[filtre].push({code, desc:norm(r[c.desc]), qty});
+    }
+    sourceName = file.name;
+    const total = CARTS.reduce((s,k) => s + carts[k.key].length, 0);
+    setStatus('Données lues dans l’onglet : ' + sheetName + ' (' + lus + ' lignes).', 'ok');
+    document.getElementById('summary').textContent = total + ' produits avec une quantité en colonne G dans les 6 paniers.';
+    current = (CARTS.find(k => carts[k.key].length) || CARTS[0]).key;
+    document.getElementById('result').classList.remove('hidden');
+    render();
+  }catch(e){
+    console.error(e);
+    setStatus('Impossible de lire ce fichier : ' + e.message, 'err');
+  }
+}
+
+// ---------- Affichage ----------
+function esc(s){ return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+function render(){
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = CARTS.map(k => `<button class="tab${k.key===current?' on':''}" data-k="${esc(k.key)}">${esc(k.key)}<span class="n">(${carts[k.key].length})</span></button>`).join('');
+  tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => { current = b.dataset.k; render(); });
+  const list = carts[current];
+  document.getElementById('cartTitle').textContent = current;
+  document.getElementById('dlOne').disabled = !list.length;
+  document.getElementById('dlAll').disabled = !CARTS.some(k => carts[k.key].length);
+  const t = document.getElementById('table');
+  if (!list.length){ t.innerHTML = '<div class="empty">Aucun produit avec une quantité en colonne G pour ce panier.</div>'; return; }
+  t.innerHTML = '<table><thead><tr><th>product_code</th><th>product_description</th><th>unit</th><th>quantity</th></tr></thead><tbody>' +
+    list.map((p,i) => { const u = unitFor(p.code); return `<tr><td>${esc(p.code)}</td><td class="desc">${esc(p.desc)}</td>
+      <td><select data-code="${esc(p.code)}" class="${u==='PKG'?'pkg':''}"><option${u==='EA'?' selected':''}>EA</option><option${u==='PKG'?' selected':''}>PKG</option></select></td>
+      <td class="q">${p.qty}</td></tr>`; }).join('') + '</tbody></table>';
+  t.querySelectorAll('select').forEach(s => s.onchange = () => {
+    const code = s.dataset.code, def = PKG_DEFAULT.includes(baseCode(code)) ? 'PKG' : 'EA';
+    if (s.value === def) delete unitOverrides[code]; else unitOverrides[code] = s.value;
+    saveUnits(unitOverrides); render();
+  });
+}
+
+// ---------- Export .xls ----------
+function today(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function exportCart(key){
+  const list = carts[key]; if (!list.length) return;
+  const aoa = [HEADERS].concat(list.map(p => [key, p.code, p.desc, unitFor(p.code), p.qty, '', '']));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = HEADERS.map(() => ({wch:9}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Worksheet 1');
+  const meta = CARTS.find(k => k.key === key);
+  XLSX.writeFile(wb, 'saved_cart_' + meta.file + '_' + today() + '.xls', {bookType:'biff8'});
+}
+document.getElementById('dlOne').onclick = () => exportCart(current);
+document.getElementById('dlAll').onclick = async () => {
+  for (const k of CARTS){ if (carts[k.key].length){ exportCart(k.key); await new Promise(r => setTimeout(r, 400)); } }
+};
+
+// ---------- Glisser-déposer ----------
+const drop = document.getElementById('drop'), input = document.getElementById('file');
+drop.onclick = () => input.click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') input.click(); };
+input.onchange = () => { handleFile(input.files[0]); input.value = ''; };
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => handleFile(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
