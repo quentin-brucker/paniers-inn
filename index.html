@@ -39,15 +39,22 @@ select.pkg{background:#fff4d6;border-color:#e0b44a;font-weight:600}
 .empty{color:var(--mute);padding:18px 4px}
 .meta{color:var(--mute);font-size:13px}
 .hidden{display:none}
+.modes{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 12px}
+.modes label{display:flex;gap:6px;align-items:center;cursor:pointer;font-size:14px}
+.modes label.on{font-weight:600;color:var(--brand)}
 </style>
 </head>
 <body>
 <header>
   <h1>Paniers INN (saved_cart)</h1>
-  <p>Glisse ton fichier Orders : la page sort les 6 paniers INN au format saved_cart .xls.</p>
+  <p>Glisse ton fichier Orders : la page sort les 6 paniers INN au format saved_cart .xls. Choisis « Jour d'inventaire » les jours d'inventaire.</p>
 </header>
 <main>
   <section class="card">
+    <div class="modes" id="modes">
+      <label class="on"><input type="radio" name="mode" value="normal" checked> Normal : onglet Concepteur, quantités en colonne G</label>
+      <label><input type="radio" name="mode" value="inv"> Jour d'inventaire : onglet Master, quantités en colonne U</label>
+    </div>
     <div id="drop" tabindex="0">
       <strong>Glisse ton fichier Orders ici</strong>
       <span class="meta">ou clique pour le choisir (.xlsx). Le fichier reste sur ton ordinateur, il n'est envoyé nulle part.</span>
@@ -84,7 +91,7 @@ const CARTS = [
   {key:'6 - INN TP Retro',      file:'6_INN_TP_retro'},
 ];
 // Codes DR en PKG par défaut (s'applique aussi aux versions C, F, RB… du même code)
-const PKG_DEFAULT = ['DR001113','DR001163','DR001169','DR001872','DR001172','DR001569','DR001553','DR001205'];
+const PKG_DEFAULT = ['DR001113','DR001163','DR001169','DR001872','DR001172','DR001569','DR001553','DR001205','DR001170','DR001873','DR001567'];
 const STORE_KEY = 'paniersINN.unites';
 const HEADERS = ['cart_name','product_code','product_description','unit','quantity','comment','virtual_itemno'];
 
@@ -119,12 +126,59 @@ function filtreRapide(r){
   return 'Autres';
 }
 
-let carts = {}, current = CARTS[0].key, sourceName = '';
+let carts = {}, current = CARTS[0].key, sourceName = '', lastFile = null;
+
+// ---------- Jour d'inventaire (onglet Master) ----------
+// Colonnes : A Description, B Statut, E Fournisseur Principal, F Code, U A commander
+const INV_MAP = {
+  'INFRIGO|$':'1 - INN Frigo $', 'TP|$':'2 - INN TP $', 'TP|G':'3 - INN TP Gratuit',
+  'INFRIGO|G':'4 - INN Frigo Gratuit', 'INFRIGORETRO|RB':'5 - INN Frigo Retro', 'TPRB2|RB':'6 - INN TP Retro'
+};
+function mode(){ return document.querySelector('input[name=mode]:checked').value; }
+function readInventaire(buf){
+  const names = XLSX.read(buf, {type:'array', bookSheets:true}).SheetNames;
+  if (!names.includes('Master')) throw new Error('Onglet « Master » introuvable dans ce fichier.');
+  const wb = XLSX.read(buf, {type:'array', sheets:['Master'], cellFormula:false, cellStyles:false});
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets['Master'], {header:1, defval:null, raw:true});
+  const hdr = (rows[0] || []).map(low);
+  const pick = (name, letter) => { const i = hdr.indexOf(name); return i >= 0 ? i : letter; };
+  const c = {desc:pick('description',0), statut:pick('statut',1), four:pick('fournisseur principal',4), code:pick('code',5), qty:pick('a commander',20)};
+  const out = {}; CARTS.forEach(k => out[k.key] = []);
+  let lus = 0, autres = 0;
+  for (let i = 1; i < rows.length; i++){
+    const r = rows[i]; if (!r) continue;
+    const code = norm(r[c.code]);
+    if (!/^DR\d+/i.test(code)) continue;
+    lus++;
+    const qty = toNum(r[c.qty]);
+    if (!(qty > 0)) continue;
+    const cart = INV_MAP[norm(r[c.four]).toUpperCase() + '|' + norm(r[c.statut]).toUpperCase()];
+    if (!cart){ autres++; continue; }
+    out[cart].push({code, desc:norm(r[c.desc]), qty});
+  }
+  return {carts:out, lus, autres};
+}
 
 function setStatus(msg, cls){ const s = document.getElementById('status'); s.textContent = msg; s.className = cls || 'meta'; }
 
 async function handleFile(file){
   if (!file) return;
+  lastFile = file;
+  if (mode() === 'inv'){
+    setStatus('Lecture de « ' + file.name + ' » (jour d’inventaire)… (quelques secondes pour un gros fichier)');
+    document.getElementById('result').classList.add('hidden');
+    try{
+      const res = readInventaire(await file.arrayBuffer());
+      carts = res.carts; sourceName = file.name;
+      const total = CARTS.reduce((s,k) => s + carts[k.key].length, 0);
+      setStatus('Jour d’inventaire : onglet Master lu (' + res.lus + ' codes DR).' + (res.autres ? ' ' + res.autres + ' ligne(s) DR avec une quantité ne vont dans aucun panier.' : ''), 'ok');
+      document.getElementById('summary').textContent = total + ' produits avec une quantité en colonne U dans les 6 paniers.';
+      current = (CARTS.find(k => carts[k.key].length) || CARTS[0]).key;
+      document.getElementById('result').classList.remove('hidden');
+      render();
+    }catch(e){ console.error(e); setStatus('Impossible de lire ce fichier : ' + e.message, 'err'); }
+    return;
+  }
   setStatus('Lecture de « ' + file.name + ' »… (quelques secondes pour un gros fichier)');
   document.getElementById('result').classList.add('hidden');
   try{
@@ -179,7 +233,7 @@ function render(){
   document.getElementById('dlOne').disabled = !list.length;
   document.getElementById('dlAll').disabled = !CARTS.some(k => carts[k.key].length);
   const t = document.getElementById('table');
-  if (!list.length){ t.innerHTML = '<div class="empty">Aucun produit avec une quantité en colonne G pour ce panier.</div>'; return; }
+  if (!list.length){ t.innerHTML = '<div class="empty">Aucun produit avec une quantité en colonne ' + (mode()==='inv'?'U':'G') + ' pour ce panier.</div>'; return; }
   t.innerHTML = '<table><thead><tr><th>product_code</th><th>product_description</th><th>unit</th><th>quantity</th></tr></thead><tbody>' +
     list.map((p,i) => { const u = unitFor(p.code); return `<tr><td>${esc(p.code)}</td><td class="desc">${esc(p.desc)}</td>
       <td><select data-code="${esc(p.code)}" class="${u==='PKG'?'pkg':''}"><option${u==='EA'?' selected':''}>EA</option><option${u==='PKG'?' selected':''}>PKG</option></select></td>
@@ -207,6 +261,12 @@ document.getElementById('dlOne').onclick = () => exportCart(current);
 document.getElementById('dlAll').onclick = async () => {
   for (const k of CARTS){ if (carts[k.key].length){ exportCart(k.key); await new Promise(r => setTimeout(r, 400)); } }
 };
+
+// ---------- Choix du mode ----------
+document.querySelectorAll('input[name=mode]').forEach(rb => rb.onchange = () => {
+  document.querySelectorAll('#modes label').forEach(l => l.classList.toggle('on', l.querySelector('input').checked));
+  if (lastFile) handleFile(lastFile);
+});
 
 // ---------- Glisser-déposer ----------
 const drop = document.getElementById('drop'), input = document.getElementById('file');
